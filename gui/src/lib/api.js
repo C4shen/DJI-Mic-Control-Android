@@ -23,3 +23,8 @@ export function setTxSetting(device, tx, setting, value) {
 export function udevHelp() {
   return invoke("udev_help");
 }
+
+/** Request USB host permission on Android when a supported receiver is connected. */
+export function requestUsbPermission() {
+  return invoke("request_usb_permission");
+}

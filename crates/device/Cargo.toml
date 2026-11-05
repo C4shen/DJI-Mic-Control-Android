@@ -7,8 +7,10 @@ description = "USB transport and multi-device orchestration for DJI wireless mic
 
 [dependencies]
 protocol = { workspace = true }
-nusb = { workspace = true }
-futures-lite = { workspace = true }
 async-channel = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+nusb = { workspace = true }
+futures-lite = { workspace = true }

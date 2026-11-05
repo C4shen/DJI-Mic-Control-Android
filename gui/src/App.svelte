@@ -1,16 +1,17 @@
 <script>
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import Sidebar from "./lib/Sidebar.svelte";
   import DevicePanel from "./lib/DevicePanel.svelte";
   import UdevModal from "./lib/UdevModal.svelte";
-  import { snapshot, setSetting, setTxSetting, udevHelp } from "./lib/api.js";
+  import { snapshot, setSetting, setTxSetting, udevHelp, requestUsbPermission } from "./lib/api.js";
 
   // Custom window chrome. macOS keeps its native traffic lights (via the
   // Overlay title bar); Windows/Linux use our own frameless controls.
   const appWindow = getCurrentWindow();
   const isMac = /Mac/i.test(navigator.userAgent || navigator.platform || "");
+  const isMobileUa = /Android|iPhone|iPad/i.test(navigator.userAgent || "");
   let maximized = $state(false);
   async function refreshMax() {
+    if (isMobileUa) return;
     try {
       maximized = await appWindow.isMaximized();
     } catch {
@@ -29,11 +30,6 @@
 
   let snap = $state(null);
   let selected = $state(null);
-  // Distinguishes "nothing selected yet" (auto-select the first device once
-  // one shows up) from "the user deliberately cleared the selection" (leave
-  // it cleared until they pick one again).
-  let userDeselected = $state(false);
-  let sidebarOpen = $state(true);
   let pending = $state({});
   let optimistic = $state({}); // values shown immediately, before the device confirms
   // Per-TX-targeted settings (currently just Voice Tone) don't fit the flat
@@ -41,14 +37,14 @@
   // different value per transmitter slot — keyed by 0-based TX index instead.
   let pendingTx = $state({});
   let optimisticVoiceTone = $state({});
-  let view = $state("compact");
   let error = $state(null);
 
   let showUdev = $state(false);
   let help = $state(null);
 
+  const isAndroid = $derived(snap?.os === "android" || isMobileUa);
   const devices = $derived(snap?.devices ?? []);
-  const selectedDevice = $derived(devices.find((d) => d.id === selected) ?? null);
+  const selectedDevice = $derived(devices.find((d) => d.id === selected) ?? devices[0] ?? null);
   const rawStatus = $derived(selectedDevice ? snap?.status ?? null : null);
   // Merge live values with any not-yet-confirmed local changes for instant feedback.
   const values = $derived({ ...(rawStatus?.settings ?? {}), ...optimistic });
@@ -64,17 +60,18 @@
   const linuxAccessIssue = $derived(
     snap?.os === "linux" && snap?.probe?.permission_issue && devices.length === 0,
   );
+  const androidAccessIssue = $derived(
+    snap?.os === "android" && snap?.probe?.permission_issue && devices.length === 0,
+  );
 
   async function refresh() {
     try {
       const next = await snapshot(selected);
       snap = next;
-      // Auto-select once devices show up, unless the user deliberately
-      // cleared the selection (clicking empty space in the sidebar).
-      if (!selected && !userDeselected && next.devices.length > 0) {
+      // Always select the connected receiver automatically.
+      if (!selected && next.devices.length > 0) {
         selected = next.devices[0].id;
       }
-      // Drop a stale selection.
       if (selected && !next.devices.some((d) => d.id === selected)) {
         selected = next.devices[0]?.id ?? null;
       }
@@ -106,19 +103,14 @@
     }
   }
 
-  function select(id) {
-    selected = id;
-    userDeselected = id === null;
-    refresh();
-  }
-
   async function change(settingId, value) {
-    if (!selected) return;
+    const devId = selectedDevice?.id;
+    if (!devId) return;
     optimistic = { ...optimistic, [settingId]: value }; // reflect the flip instantly
     pending = { ...pending, [settingId]: true };
     error = null;
     try {
-      await setSetting(selected, settingId, value);
+      await setSetting(devId, settingId, value);
       await refresh();
     } catch (e) {
       error = String(e);
@@ -131,7 +123,8 @@
   }
 
   async function changeTx(tx, settingId, value) {
-    if (!selected) return;
+    const devId = selectedDevice?.id;
+    if (!devId) return;
     // Only Voice Tone exists today; extend this map if a second per-TX
     // setting is added.
     if (settingId === "voice-tone") {
@@ -140,7 +133,7 @@
     pendingTx = { ...pendingTx, [tx]: true };
     error = null;
     try {
-      await setTxSetting(selected, tx, settingId, value);
+      await setTxSetting(devId, tx, settingId, value);
       await refresh();
     } catch (e) {
       error = String(e);
@@ -155,6 +148,14 @@
   async function openUdev() {
     if (!help) help = await udevHelp();
     showUdev = true;
+  }
+
+  async function askAndroidUsbPermission() {
+    try {
+      await requestUsbPermission();
+    } catch (e) {
+      error = String(e);
+    }
   }
 
   $effect(() => {
@@ -172,8 +173,8 @@
   });
 </script>
 
-<div class="app" class:mac={isMac}>
-  {#if !isMac}
+<div class="app" class:mac={isMac} class:android={isAndroid}>
+  {#if !isMac && !isAndroid}
     <div class="rz rz-n" onmousedown={startResize("North")}></div>
     <div class="rz rz-s" onmousedown={startResize("South")}></div>
     <div class="rz rz-e" onmousedown={startResize("East")}></div>
@@ -184,16 +185,11 @@
     <div class="rz rz-sw" onmousedown={startResize("SouthWest")}></div>
   {/if}
 
-  <div class="topbar" class:mac={isMac} data-tauri-drag-region>
-    <button class="icon-btn" onclick={() => (sidebarOpen = !sidebarOpen)} aria-label="Toggle devices">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-        <path d="M3.5 6h17M3.5 12h17M3.5 18h17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-      </svg>
-    </button>
+  <div class="topbar" class:mac={isMac} class:android={isAndroid} data-tauri-drag-region>
     <span class="brand" data-tauri-drag-region>DJI Mic Control</span>
     <div class="drag-fill" data-tauri-drag-region></div>
 
-    {#if !isMac}
+    {#if !isMac && !isAndroid}
       <div class="win-controls">
         <button class="win-btn" onclick={minimizeWin} aria-label="Minimize">
           <svg width="11" height="11" viewBox="0 0 12 12"><path d="M2 6h8" stroke="currentColor" stroke-width="1.2" /></svg>
@@ -216,7 +212,15 @@
 
   {#if linuxAccessIssue}
     <button class="banner" onclick={openUdev}>
-      A microphone is connected but not accessible — click to fix USB permissions.
+      <span class="banner-dot"></span>
+      <span>A microphone is connected but not accessible — click to fix USB permissions.</span>
+    </button>
+  {/if}
+
+  {#if androidAccessIssue}
+    <button class="banner" onclick={askAndroidUsbPermission}>
+      <span class="banner-dot"></span>
+      <span>A microphone is connected — tap here to grant USB access permission.</span>
     </button>
   {/if}
 
@@ -225,10 +229,6 @@
   {/if}
 
   <div class="body">
-    <div class="sidebar-wrap" class:open={sidebarOpen}>
-      <Sidebar {devices} {selected} onselect={select} />
-    </div>
-
     <main class="main">
       {#if selectedDevice && status}
         <DevicePanel
@@ -238,24 +238,29 @@
           {values}
           {pending}
           {pendingTx}
-          {view}
           onchange={change}
           onchangeTx={changeTx}
-          onview={(v) => (view = v)}
         />
       {:else}
         <div class="placeholder">
           <div class="ph-card">
+            <div class="ph-squircle" aria-hidden="true">
+              <svg width="34" height="34" viewBox="0 0 24 24" fill="none">
+                <rect x="8.5" y="2.5" width="7" height="12" rx="3.5" stroke="currentColor" stroke-width="2" />
+                <path d="M5 10.5a7 7 0 0 0 14 0M12 17.5v4M8.5 21.5h7" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+              </svg>
+            </div>
             {#if linuxAccessIssue}
               <h2>Permission needed</h2>
               <p>A supported microphone is connected but can't be accessed.</p>
               <button class="cta" onclick={openUdev}>Show setup instructions</button>
-            {:else if devices.length > 0}
-              <h2>No device selected</h2>
-              <p>Choose a device from the sidebar.</p>
+            {:else if androidAccessIssue}
+              <h2>USB permission needed</h2>
+              <p>A DJI Mic Mini receiver is connected to your phone, but USB access has not been granted yet.</p>
+              <button class="cta" onclick={askAndroidUsbPermission}>Grant USB Permission</button>
             {:else}
               <h2>No microphone connected</h2>
-              <p>Connect a supported DJI microphone over USB to get started.</p>
+              <p>Connect a supported DJI microphone receiver over USB-C to get started.</p>
             {/if}
           </div>
         </div>
@@ -273,15 +278,17 @@
     height: 100%;
     display: flex;
     flex-direction: column;
-    /* The window is frameless on some platforms (no native border/shadow),
-       so a solid-color desktop behind it can make the edge disappear
-       entirely without this. Not needed on macOS, which already has native
-       decorations (see .mac below). */
-    border: 1px solid var(--border);
+    background: var(--md-sys-color-surface);
+    border: 1px solid var(--md-sys-color-outline-variant);
   }
-  .app.mac {
+  .app.mac,
+  .app.android {
     border: none;
   }
+  .app.android {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
   /* Invisible resize handles pinned to the window edges/corners. */
   .rz {
     position: fixed;
@@ -343,119 +350,117 @@
     height: 11px;
     cursor: nesw-resize;
   }
+
+  /* Material 3 Expressive Top App Bar */
   .topbar {
     position: relative;
     flex: 0 0 auto;
-    height: 30px;
+    height: 44px;
     display: flex;
     align-items: center;
-    gap: 4px;
-    padding: 0 2px 0 4px;
-    background: var(--bg-panel);
-    border-bottom: 1px solid var(--border);
+    gap: 8px;
+    padding: 0 4px 0 8px;
+    background: var(--md-sys-color-surface);
     user-select: none;
+    z-index: 30;
   }
-  /* Leave room for the macOS traffic lights (top-left) under the overlay title bar. */
   .topbar.mac {
-    padding-left: 76px;
+    padding-left: 78px;
+  }
+  .topbar.android {
+    height: calc(56px + env(safe-area-inset-top, 0px));
+    padding: env(safe-area-inset-top, 0px) 12px 0;
+  }
+  .topbar.android .brand {
+    top: calc(50% + env(safe-area-inset-top, 0px) / 2);
+    font-size: 18px;
+    font-weight: 700;
   }
   .drag-fill {
     flex: 1 1 auto;
     align-self: stretch;
   }
-  .icon-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 24px;
-    height: 24px;
-    padding: 0;
-    line-height: 0;
-    border: 1px solid transparent;
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--text-dim);
-  }
-  .icon-btn:hover {
-    background: var(--bg-elev);
-    color: var(--text);
-  }
-  /* Kill inline-svg baseline gap so icons sit dead-center in their buttons. */
   .topbar button svg {
     display: block;
   }
-  /* Absolutely centered so it stays put regardless of the side controls. */
   .brand {
     position: absolute;
     left: 50%;
     top: 50%;
     transform: translate(-50%, -50%);
-    font-weight: 600;
-    font-size: 13px;
-    letter-spacing: 0.01em;
-    color: var(--text-dim);
+    font-weight: 700;
+    font-size: 15px;
+    letter-spacing: -0.01em;
+    color: var(--md-sys-color-on-surface);
     white-space: nowrap;
   }
+
   .win-controls {
     display: flex;
     align-self: stretch;
     margin-left: 4px;
   }
   .win-btn {
-    width: 40px;
+    width: 42px;
     align-self: stretch;
     display: grid;
     place-items: center;
     border: none;
     background: transparent;
-    color: var(--text-dim);
-    transition: background 0.12s, color 0.12s;
+    color: var(--md-sys-color-on-surface-variant);
+    transition: background 0.14s, color 0.14s;
   }
   .win-btn:hover {
-    background: var(--bg-elev);
-    color: var(--text);
+    background: var(--md-sys-color-surface-container-high);
+    color: var(--md-sys-color-on-surface);
   }
   .win-btn.close:hover {
     background: #e5484d;
     color: #fff;
   }
+
+  /* Expressive Tonal Alert Banner */
   .banner {
     flex: 0 0 auto;
+    margin: 4px 14px 8px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
     text-align: left;
     border: none;
-    padding: 10px 16px;
-    background: color-mix(in srgb, var(--warn) 16%, var(--bg-panel));
-    color: var(--text);
-    border-bottom: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+    border-radius: var(--radius-md);
+    padding: 12px 16px;
+    background: var(--warn-container);
+    color: var(--on-warn-container);
     font-size: 13px;
+    font-weight: 600;
+  }
+  .banner-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--warn);
+    flex: 0 0 auto;
   }
   .banner.err {
-    background: color-mix(in srgb, var(--danger) 16%, var(--bg-panel));
-    border-bottom-color: color-mix(in srgb, var(--danger) 40%, transparent);
+    background: var(--danger-container);
+    color: var(--on-danger-container);
   }
+
   .body {
     flex: 1 1 auto;
     display: flex;
     min-height: 0;
+    position: relative;
   }
-  /* Collapsible sidebar: animate width so the panel slides in/out. The inner
-     Sidebar keeps a fixed width and is clipped, giving a smooth slide. */
-  .sidebar-wrap {
-    flex: 0 0 auto;
-    width: 260px;
-    overflow: hidden;
-    border-right: 1px solid var(--border);
-    transition: width 0.22s ease, border-color 0.22s ease;
-  }
-  .sidebar-wrap:not(.open) {
-    width: 0;
-    border-right-color: transparent;
-  }
+
   .main {
     flex: 1 1 auto;
     min-width: 0;
     display: flex;
   }
+
+  /* Expressive Placeholder Card */
   .placeholder {
     flex: 1 1 auto;
     display: grid;
@@ -464,24 +469,56 @@
   }
   .ph-card {
     text-align: center;
-    max-width: 340px;
-    color: var(--text-dim);
+    max-width: 380px;
+    background: var(--md-sys-color-surface-container-low);
+    border-radius: var(--radius-xl);
+    padding: 32px 28px;
+    color: var(--md-sys-color-on-surface-variant);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .ph-squircle {
+    width: 72px;
+    height: 72px;
+    border-radius: 22px;
+    background: var(--md-sys-color-primary-container);
+    color: var(--md-sys-color-on-primary-container);
+    display: grid;
+    place-items: center;
+    margin-bottom: 18px;
   }
   .ph-card h2 {
     margin: 0 0 8px;
-    color: var(--text);
-    font-size: 18px;
+    color: var(--md-sys-color-on-surface);
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
   }
   .ph-card p {
-    margin: 0 0 16px;
+    margin: 0 0 22px;
     line-height: 1.5;
+    font-size: 14px;
   }
   .cta {
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: var(--accent-contrast);
-    padding: 8px 16px;
-    border-radius: var(--radius-sm);
+    border: none;
+    background: var(--md-sys-color-primary);
+    color: var(--md-sys-color-on-primary);
+    padding: 12px 24px;
+    border-radius: var(--radius-pill);
+    font-size: 14px;
     font-weight: 600;
+    letter-spacing: 0.01em;
+    transition:
+      transform 0.18s var(--m3-spring-fast),
+      border-radius 0.22s var(--m3-spring-spatial),
+      filter 0.15s;
+  }
+  .cta:hover {
+    filter: brightness(1.06);
+  }
+  .cta:active {
+    transform: scale(0.96);
+    border-radius: var(--radius-md);
   }
 </style>

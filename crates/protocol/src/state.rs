@@ -32,7 +32,7 @@ impl Serialize for Firmware {
 /// On v2 firmware these arrive in separate periodic pushes from the compact
 /// status heartbeat (see `PROTOCOL.md`), so there's a brief window after
 /// connecting before they're known.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 pub struct TxInfo {
     /// Live audio input level (raw device units).
     pub level: Option<u8>,
@@ -89,6 +89,13 @@ pub struct DeviceStatus {
     /// on v2 firmware; not yet located in v1's heartbeat, so always `None`
     /// there for now.
     pub gain_dial: Option<i8>,
+    /// Per-slot cache of identity (`serial`, `firmware`, `product_name`) and
+    /// latest `level` learned from v2 record pushes so a status push that
+    /// arrives after an early record push or after a brief link drop retains
+    /// the transmitter's identity without turning a disconnected slot into
+    /// `Some` prematurely.
+    #[serde(skip)]
+    pub tx_cache: [TxInfo; 2],
 }
 
 impl DeviceStatus {
@@ -103,6 +110,7 @@ impl DeviceStatus {
             settings: BTreeMap::new(),
             protocol_version: None,
             gain_dial: None,
+            tx_cache: [TxInfo::default(), TxInfo::default()],
         }
     }
 

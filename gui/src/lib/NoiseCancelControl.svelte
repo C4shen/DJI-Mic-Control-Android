@@ -1,8 +1,7 @@
 <script>
   // Noise Cancel's three settings (power, mode, and the TX-button toggle) are
-  // closely related, so they render as one combined element instead of three
-  // separate rows: a main switch for "Noise Cancelling", with the Basic/Strong
-  // mode picker and the TX-button toggle nested underneath it.
+  // closely related, so they render as one combined Material 3 Expressive card
+  // item instead of three separate rows.
   let {
     power,
     mode,
@@ -14,9 +13,15 @@
     onchange,
   } = $props();
 
+  const MODE_DESCRIPTIONS = {
+    basic: "Preserve audio fidelity, which is suitable for relatively quiet indoor environments",
+    strong: "Reduce noise effectively, which is suitable for noisy outdoor environments",
+  };
+
   const powerValue = $derived(values[power.id] ?? null);
   const modeValue = $derived(values[mode.id] ?? null);
   const buttonValue = $derived(values[button.id] ?? null);
+  const modeDescription = $derived(MODE_DESCRIPTIONS[modeValue] ?? MODE_DESCRIPTIONS.basic);
 
   const powerReason = $derived(lockReason(power));
   const modeReason = $derived(lockReason(mode));
@@ -47,12 +52,17 @@
   }
 </script>
 
-<div class="ncgroup" class:compact>
+<div class="ncgroup m3-item" class:compact>
   <div class="ncmain" class:busy={!!pending[power.id]} title={powerLocked ? powerReason : null}>
     <div class="label">
       <span class="title">{power.label}</span>
       {#if powerLocked}
-        <span class="lock" title={powerReason} aria-label={powerReason}>🔒</span>
+        <span class="lock" title={powerReason} aria-label={powerReason}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
+            <rect x="5" y="11" width="14" height="10" rx="3" stroke="currentColor" stroke-width="2" />
+            <path d="M8 11V7a4 4 0 0 1 8 0v4" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+          </svg>
+        </span>
       {/if}
     </div>
     <div class="control" class:dim={powerLocked}>
@@ -60,80 +70,144 @@
         <span class="unknown">—</span>
       {:else}
         <button
-          class="switch"
+          class="m3-switch"
           class:on={powerChecked}
           role="switch"
           aria-checked={powerChecked}
           aria-label={power.label}
           onclick={togglePower}
         >
-          <span class="knob"></span>
+          <span class="m3-thumb">
+            <svg class="m3-check" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path
+                d="M3.5 8.3 6.6 11.4 12.6 4.8"
+                stroke="currentColor"
+                stroke-width="2.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </span>
         </button>
       {/if}
     </div>
   </div>
 
-  <div class="ncsub" class:busy={!!pending[mode.id]} title={modeLocked ? modeReason : null}>
-    <div class="label">
-      <span class="subtitle">Mode</span>
-      {#if modeLocked}
-        <span class="lock" title={modeReason} aria-label={modeReason}>🔒</span>
-      {/if}
-    </div>
-    <div class="control" class:dim={modeLocked}>
-      {#if modeValue === null}
-        <span class="unknown">—</span>
-      {:else}
-        <div class="segmented" role="group" aria-label={mode.label}>
-          {#each mode.options as opt (opt.value)}
-            <button class="segment" class:active={modeValue === opt.value} onclick={() => chooseMode(opt.value)}>
-              {opt.label}
-            </button>
-          {/each}
+  <div class="ncsub-container">
+    <div class="ncsub-block" class:busy={!!pending[mode.id]} title={modeLocked ? modeReason : null}>
+      <div class="ncsub">
+        <div class="label">
+          <span class="subtitle">Mode</span>
+          {#if modeLocked}
+            <span class="lock" title={modeReason} aria-label={modeReason}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
+                <rect x="5" y="11" width="14" height="10" rx="3" stroke="currentColor" stroke-width="2" />
+                <path d="M8 11V7a4 4 0 0 1 8 0v4" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+              </svg>
+            </span>
+          {/if}
         </div>
+        <div class="control" class:dim={modeLocked}>
+          {#if modeValue === null}
+            <span class="unknown">—</span>
+          {:else}
+            <div class="m3-segmented" role="group" aria-label={mode.label}>
+              {#each mode.options as opt (opt.value)}
+                <button
+                  class="m3-segment"
+                  class:active={modeValue === opt.value}
+                  onclick={() => chooseMode(opt.value)}
+                >
+                  {opt.label}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      </div>
+      {#if modeDescription}
+        <p class="mode-desc">{modeDescription}</p>
       {/if}
     </div>
-  </div>
 
-  <div class="ncsub" class:busy={!!pending[button.id]} title={buttonLocked ? buttonReason : null}>
-    <div class="label">
-      <span class="subtitle">{button.label}</span>
-      {#if buttonLocked}
-        <span class="lock" title={buttonReason} aria-label={buttonReason}>🔒</span>
-      {/if}
-    </div>
-    <div class="control" class:dim={buttonLocked}>
-      {#if buttonValue === null}
-        <span class="unknown">—</span>
-      {:else}
-        <button
-          class="switch small"
-          class:on={buttonChecked}
-          role="switch"
-          aria-checked={buttonChecked}
-          aria-label={button.label}
-          onclick={toggleButton}
-        >
-          <span class="knob"></span>
-        </button>
-      {/if}
+    <div class="ncsub-divider"></div>
+
+    <div class="ncsub-block" class:busy={!!pending[button.id]} title={buttonLocked ? buttonReason : null}>
+      <div class="ncsub">
+        <div class="label">
+          <span class="subtitle">{button.label}</span>
+          {#if buttonLocked}
+            <span class="lock" title={buttonReason} aria-label={buttonReason}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
+                <rect x="5" y="11" width="14" height="10" rx="3" stroke="currentColor" stroke-width="2" />
+                <path d="M8 11V7a4 4 0 0 1 8 0v4" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+              </svg>
+            </span>
+          {/if}
+        </div>
+        <div class="control" class:dim={buttonLocked}>
+          {#if buttonValue === null}
+            <span class="unknown">—</span>
+          {:else}
+            <button
+              class="m3-switch small"
+              class:on={buttonChecked}
+              role="switch"
+              aria-checked={buttonChecked}
+              aria-label={button.label}
+              onclick={toggleButton}
+            >
+              <span class="m3-thumb">
+                <svg class="m3-check" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path
+                    d="M3.5 8.3 6.6 11.4 12.6 4.8"
+                    stroke="currentColor"
+                    stroke-width="2.2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </span>
+            </button>
+          {/if}
+        </div>
+      </div>
+      <p class="mode-desc">When enabled, press power button on transmitter to reduce noise</p>
     </div>
   </div>
 </div>
 
 <style>
   .ncgroup {
-    padding: 10px 4px 13px;
-    border-bottom: 1px solid var(--border);
+    padding: 14px 18px;
+    background: var(--md-sys-color-surface-container);
+    border-radius: 8px;
+  }
+  .ncgroup:first-child {
+    border-top-left-radius: 22px;
+    border-top-right-radius: 22px;
   }
   .ncgroup:last-child {
-    border-bottom: none;
+    border-bottom-left-radius: 22px;
+    border-bottom-right-radius: 22px;
+  }
+  .ncgroup:only-child {
+    border-radius: 22px;
   }
   .ncgroup.compact {
-    padding: 8px 10px;
-    border-bottom: none;
-    background: var(--bg-elev);
-    border-radius: var(--radius-sm);
+    padding: 12px 14px;
+    border-radius: 8px;
+  }
+  .ncgroup.compact:first-child {
+    border-top-left-radius: 20px;
+    border-top-right-radius: 20px;
+  }
+  .ncgroup.compact:last-child {
+    border-bottom-left-radius: 20px;
+    border-bottom-right-radius: 20px;
+  }
+  .ncgroup.compact:only-child {
+    border-radius: 20px;
   }
 
   .ncmain {
@@ -141,148 +215,227 @@
     align-items: center;
     justify-content: space-between;
     gap: 14px;
-    padding: 3px 0;
+    padding: 2px 0 10px;
   }
   .ncmain.busy {
     cursor: progress;
+  }
+  .ncsub-container {
+    background: var(--md-sys-color-surface-container-low);
+    border-radius: 14px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .ncsub-block {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .ncsub-block.busy {
+    cursor: progress;
+  }
+  .ncsub-divider {
+    height: 1px;
+    background: color-mix(in srgb, var(--md-sys-color-outline-variant) 45%, transparent);
   }
   .ncsub {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 14px;
-    padding: 6px 0 0 14px;
+    gap: 12px;
   }
   .ncsub.busy {
     cursor: progress;
   }
-  .compact .ncsub {
-    padding-left: 10px;
+  .mode-desc {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--md-sys-color-on-surface-variant);
   }
 
   .label {
     display: flex;
-    align-items: baseline;
-    gap: 6px;
+    align-items: center;
+    gap: 7px;
     min-width: 0;
   }
   .title {
-    font-weight: 500;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--md-sys-color-on-surface);
   }
   .compact .title {
-    font-size: 13px;
+    font-size: 13.5px;
   }
   .subtitle {
-    font-size: 12px;
-    color: var(--text-dim);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--md-sys-color-on-surface);
   }
   .lock {
-    font-size: 11px;
-    opacity: 0.7;
+    display: inline-flex;
+    align-items: center;
+    color: var(--md-sys-color-outline);
     cursor: help;
+    flex: 0 0 auto;
   }
   .control.dim {
-    opacity: 0.4;
+    opacity: 0.38;
     pointer-events: none;
   }
   .unknown {
-    color: var(--text-faint);
+    color: var(--md-sys-color-outline);
   }
 
-  /* Switch (mirrors SettingControl's, plus a smaller variant for the nested
-     TX-button toggle) */
-  .switch {
-    width: 42px;
-    height: 25px;
-    border-radius: 999px;
-    border: none;
-    background: var(--border-strong);
+  /* Material 3 Expressive Switch */
+  .m3-switch {
+    width: 52px;
+    height: 32px;
+    border-radius: var(--radius-pill);
+    border: 2px solid var(--md-sys-color-outline);
+    background: var(--md-sys-color-surface-container-highest);
     padding: 0;
     position: relative;
-    transition: background 0.16s;
+    display: inline-flex;
+    align-items: center;
     flex: 0 0 auto;
+    transition:
+      background 0.22s var(--m3-standard),
+      border-color 0.22s var(--m3-standard);
   }
-  .compact .switch {
-    width: 36px;
-    height: 21px;
+  .compact .m3-switch {
+    width: 46px;
+    height: 28px;
   }
-  .switch.small {
-    width: 32px;
-    height: 19px;
+  .m3-switch.small {
+    width: 42px;
+    height: 26px;
   }
-  .compact .switch.small {
-    width: 28px;
-    height: 17px;
+  .compact .m3-switch.small {
+    width: 38px;
+    height: 24px;
   }
-  .switch.on {
-    background: var(--accent);
+  .m3-switch.on {
+    background: var(--md-sys-color-primary);
+    border-color: var(--md-sys-color-primary);
   }
-  .knob {
+  .m3-thumb {
     position: absolute;
-    top: 3px;
-    left: 3px;
-    width: 19px;
-    height: 19px;
-    border-radius: 50%;
-    background: #fff;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
-    transition: transform 0.16s;
+    left: 6px;
+    width: 16px;
+    height: 16px;
+    border-radius: var(--radius-pill);
+    background: var(--md-sys-color-outline);
+    color: var(--md-sys-color-primary);
+    display: grid;
+    place-items: center;
+    transition:
+      transform 0.28s var(--m3-spring-spatial),
+      width 0.24s var(--m3-spring-fast),
+      height 0.24s var(--m3-spring-fast),
+      left 0.24s var(--m3-spring-spatial),
+      background 0.2s var(--m3-standard);
   }
-  .compact .knob {
-    width: 15px;
-    height: 15px;
+  .compact .m3-thumb {
+    left: 5px;
+    width: 14px;
+    height: 14px;
   }
-  .switch.on .knob {
-    transform: translateX(17px);
-  }
-  .compact .switch.on .knob {
-    transform: translateX(15px);
-  }
-  .switch.small .knob {
+  .m3-switch.small .m3-thumb {
+    left: 4px;
     width: 13px;
     height: 13px;
   }
-  .switch.small.on .knob {
-    transform: translateX(13px);
+  .compact .m3-switch.small .m3-thumb {
+    left: 4px;
+    width: 12px;
+    height: 12px;
   }
-  .compact .switch.small .knob {
+  .m3-switch.on .m3-thumb {
+    left: 22px;
+    width: 24px;
+    height: 24px;
+    background: var(--md-sys-color-on-primary);
+  }
+  .compact .m3-switch.on .m3-thumb {
+    left: 19px;
+    width: 21px;
+    height: 21px;
+  }
+  .m3-switch.small.on .m3-thumb {
+    left: 17px;
+    width: 19px;
+    height: 19px;
+  }
+  .compact .m3-switch.small.on .m3-thumb {
+    left: 15px;
+    width: 17px;
+    height: 17px;
+  }
+  .m3-check {
+    width: 13px;
+    height: 13px;
+    opacity: 0;
+    transform: scale(0.4);
+    transition:
+      opacity 0.16s var(--m3-standard),
+      transform 0.24s var(--m3-spring-fast);
+  }
+  .m3-switch.small .m3-check {
     width: 11px;
     height: 11px;
   }
-  .compact .switch.small.on .knob {
-    transform: translateX(11px);
+  .m3-switch.on .m3-check {
+    opacity: 1;
+    transform: scale(1);
   }
 
-  /* Segmented (mirrors SettingControl's) */
-  .segmented {
+  /* Material 3 Expressive Connected Segmented Buttons */
+  .m3-segmented {
     display: inline-flex;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 2px;
+    align-items: center;
+    gap: 3px;
+    background: var(--md-sys-color-surface-container-highest);
+    padding: 3px;
+    border-radius: var(--radius-pill);
     flex: 0 0 auto;
   }
-  .segment {
+  .m3-segment {
     border: none;
-    background: transparent;
-    color: var(--text-dim);
-    padding: 5px 14px;
-    border-radius: 999px;
-    font-weight: 500;
-    transition: background 0.14s, color 0.14s;
-  }
-  .compact .segment {
-    padding: 3px 10px;
+    background: var(--md-sys-color-surface-container-low);
+    color: var(--md-sys-color-on-surface-variant);
+    padding: 5px 12px;
     font-size: 12px;
+    font-weight: 600;
+    border-radius: 8px;
+    transition:
+      background 0.2s var(--m3-standard),
+      color 0.2s var(--m3-standard),
+      border-radius 0.28s var(--m3-spring-spatial),
+      transform 0.16s var(--m3-spring-fast);
   }
-  .segment.active {
-    background: var(--accent);
-    color: var(--accent-contrast);
+  .m3-segment:first-child {
+    border-top-left-radius: var(--radius-pill);
+    border-bottom-left-radius: var(--radius-pill);
+  }
+  .m3-segment:last-child {
+    border-top-right-radius: var(--radius-pill);
+    border-bottom-right-radius: var(--radius-pill);
+  }
+  .m3-segment:hover:not(.active) {
+    background: var(--md-sys-color-surface-container);
+    color: var(--md-sys-color-on-surface);
+  }
+  .m3-segment:active {
+    transform: scale(0.95);
+  }
+  .m3-segment.active {
+    background: var(--md-sys-color-primary);
+    color: var(--md-sys-color-on-primary);
+    border-radius: var(--radius-pill);
+    font-weight: 700;
   }
 </style>

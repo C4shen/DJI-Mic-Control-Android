@@ -11,10 +11,8 @@
     values = {},
     pending = {},
     pendingTx = {},
-    view = "compact",
     onchange,
     onchangeTx,
-    onview,
   } = $props();
 
   // Audio levels sit roughly in the 0x14–0x4f range; scale to a full bar.
@@ -26,10 +24,6 @@
 
   // Gain dial in dB: always show a sign except at exactly 0.
   const formatGain = (v) => (v > 0 ? `+${v}` : `${v}`);
-
-  // A transmitter card's title: its own reported product name once known
-  // (e.g. "DJI Mic Mini 2 (TX1)"), else the bare slot number.
-  const txLabel = (tx, i) => (tx?.product_name ? `${tx.product_name} (TX${i + 1})` : `TX${i + 1}`);
 
   // Artwork varies by the transmitter's own reported product name — a Mic
   // Mini 2 looks different from the original. Returns null (no picture)
@@ -88,7 +82,7 @@
   // boundaries. Each card lands in the currently-shortest column.
   let groupsWidth = $state(0);
   const MIN_COL = 260;
-  const COL_GAP = 18;
+  const COL_GAP = 16;
   const colCount = $derived(
     Math.max(1, Math.min(groups.length, Math.floor((groupsWidth + COL_GAP) / (MIN_COL + COL_GAP)))),
   );
@@ -108,24 +102,15 @@
 
   // Why a setting is locked, or null if it is freely settable.
   function lockReason(s) {
-    // Settings v2 firmware introduced don't exist on a v1 device at all.
-    // "noise-cancel-power" still shows its real value there (see the
-    // decoder) since v1 firmware reports it, just via the TX's button
-    // rather than a settable command.
     if (status.protocol_version === 1 && s.v1_command == null) {
       return "Requires protocol v2, please update your firmware";
     }
-    // NC mode is meaningless unless NC is enabled — on v2 firmware that's a
-    // toggle in its own right; on v1 firmware it's only the TX's button.
     if (s.id === "noise-cancel" && status.nc_enabled === false) {
       const toggle = labelById["noise-cancel-power"];
       return toggle
         ? `Turn on "${toggle}" first`
         : "Turn on Noise Cancel using the button on the transmitter";
     }
-    // Mutually exclusive settings lock each other while active. Audio
-    // Channels is an enum ("mono"/"stereo"), not a switch, so its "active"
-    // value isn't the usual "on".
     for (const other of s.exclusive_with ?? []) {
       if (other === "stereo") {
         if (values.stereo === "stereo") {
@@ -141,12 +126,13 @@
 
 <div class="panel">
   <header class="head">
-    <span class="picto"><DevicePicto pictogram={`${device.pictogram_key}-rx`} size={54} /></span>
+    <span class="picto"><DevicePicto pictogram={`${device.pictogram_key}-rx`} size={46} /></span>
     <div class="titles">
       <h1>{device.model_name}</h1>
       <span class="sub">{status.rx?.serial ?? device.id}</span>
     </div>
     <span class="pill" class:on={status.connected}>
+      <span class="pill-dot"></span>
       {status.connected ? "Connected" : "No signal"}
     </span>
   </header>
@@ -155,7 +141,9 @@
     <div class="card">
       <div class="card-head">
         <span class="card-title">Receiver</span>
-        <DevicePicto pictogram={`${device.pictogram_key}-rx`} size={40} />
+        <span class="card-picto">
+          <DevicePicto pictogram={`${device.pictogram_key}-rx`} size={36} />
+        </span>
       </div>
       {#if status.rx}
         <div class="kv"><span>Serial</span><b>{orUnknown(status.rx.serial)}</b></div>
@@ -174,30 +162,35 @@
       {#if status.gain_dial != null}
         <div class="kv">
           <span>Gain</span>
-          <b class="gain" class:zero={status.gain_dial === 0}>{formatGain(status.gain_dial)} dB</b>
+          <span class="gain-chip" class:zero={status.gain_dial === 0}>{formatGain(status.gain_dial)} dB</span>
         </div>
       {/if}
     </div>
 
     {#each status.tx as tx, i}
       {@const picto = txPictogram(tx, status.protocol_version)}
-      <div class="card">
+      <div class="card" class:disconnected={!tx}>
         <div class="card-head">
           <span class="card-title">
-            {txLabel(tx, i)}
+            <span class="tx-badge">TX{i + 1}</span>
+            <span>{tx?.product_name ?? "Transmitter"}</span>
             {#if tx}
               <BatteryIcon value={tx.battery} charging={!!tx.charging} />
             {/if}
           </span>
           {#if picto}
-            <DevicePicto pictogram={picto} size={38} />
+            <span class="card-picto">
+              <DevicePicto pictogram={picto} size={34} />
+            </span>
           {/if}
         </div>
         {#if tx}
           <div class="kv"><span>Serial</span><b>{orUnknown(tx.serial)}</b></div>
           <div class="kv"><span>Firmware</span><b>{orUnknown(tx.firmware)}</b></div>
           <div class="level">
-            <span class="lvl-label">Level</span>
+            <div class="lvl-row">
+              <span class="lvl-label">Input Level</span>
+            </div>
             <div class="meter">
               <div class="unfilled" style="left:{levelPct(tx.level)}%"></div>
             </div>
@@ -214,7 +207,7 @@
             </div>
           {/if}
         {:else}
-          <div class="muted">Disconnected</div>
+          <div class="muted-box">Disconnected</div>
         {/if}
       </div>
     {/each}
@@ -222,76 +215,45 @@
 
   <section class="settings-head">
     <span class="settings-title">Settings</span>
-    <div class="view-switch" role="group" aria-label="Settings layout">
-      <button class:active={view === "compact"} onclick={() => onview?.("compact")}>Compact</button>
-      <button class:active={view === "list"} onclick={() => onview?.("list")}>List</button>
-    </div>
   </section>
 
-  {#if view === "list"}
-    <section class="settings">
-      {#each renderSettings as s (s.id)}
-        {#if s.__ncComposite}
-          <NoiseCancelControl
-            power={settingsById["noise-cancel-power"]}
-            mode={settingsById["noise-cancel"]}
-            button={settingsById["noise-cancel-button"]}
-            {values}
-            {pending}
-            {lockReason}
-            {onchange}
-          />
-        {:else}
-          <SettingControl
-            setting={s}
-            value={values[s.id] ?? null}
-            pending={!!pending[s.id]}
-            locked={!!lockReason(s)}
-            lockReason={lockReason(s) ?? ""}
-            {onchange}
-          />
-        {/if}
-      {/each}
-    </section>
-  {:else}
-    <section class="groups" bind:clientWidth={groupsWidth}>
-      {#each columns as col, ci (ci)}
-        <div class="col">
-          {#each col as [name, items] (name)}
-            <div class="group">
-              <div class="group-title">{name}</div>
-              <div class="group-grid">
-                {#each items as s (s.id)}
-                  {#if s.__ncComposite}
-                    <NoiseCancelControl
-                      power={settingsById["noise-cancel-power"]}
-                      mode={settingsById["noise-cancel"]}
-                      button={settingsById["noise-cancel-button"]}
-                      {values}
-                      {pending}
-                      {lockReason}
-                      compact
-                      {onchange}
-                    />
-                  {:else}
-                    <SettingControl
-                      setting={s}
-                      value={values[s.id] ?? null}
-                      pending={!!pending[s.id]}
-                      locked={!!lockReason(s)}
-                      lockReason={lockReason(s) ?? ""}
-                      compact
-                      {onchange}
-                    />
-                  {/if}
-                {/each}
-              </div>
+  <section class="groups" bind:clientWidth={groupsWidth}>
+    {#each columns as col, ci (ci)}
+      <div class="col">
+        {#each col as [name, items] (name)}
+          <div class="group">
+            <div class="group-title">{name}</div>
+            <div class="group-grid">
+              {#each items as s (s.id)}
+                {#if s.__ncComposite}
+                  <NoiseCancelControl
+                    power={settingsById["noise-cancel-power"]}
+                    mode={settingsById["noise-cancel"]}
+                    button={settingsById["noise-cancel-button"]}
+                    {values}
+                    {pending}
+                    {lockReason}
+                    compact
+                    {onchange}
+                  />
+                {:else}
+                  <SettingControl
+                    setting={s}
+                    value={values[s.id] ?? null}
+                    pending={!!pending[s.id]}
+                    locked={!!lockReason(s)}
+                    lockReason={lockReason(s) ?? ""}
+                    compact
+                    {onchange}
+                  />
+                {/if}
+              {/each}
             </div>
-          {/each}
-        </div>
-      {/each}
-    </section>
-  {/if}
+          </div>
+        {/each}
+      </div>
+    {/each}
+  </section>
 </div>
 
 <style>
@@ -299,20 +261,33 @@
     flex: 1 1 auto;
     height: 100%;
     overflow-y: auto;
-    padding: 22px 26px 40px;
+    padding: 12px 24px 44px;
   }
+  @media (max-width: 600px) {
+    .panel {
+      padding: 8px 14px 36px;
+    }
+  }
+
+  /* Expressive Hero Header Card */
   .head {
     display: flex;
     align-items: center;
     gap: 16px;
-    margin-bottom: 22px;
+    margin-bottom: 18px;
+    padding: 16px 20px;
+    border-radius: var(--radius-xl);
+    background: var(--md-sys-color-surface-container-low);
   }
   .picto {
-    width: 52px;
-    height: 52px;
+    width: 60px;
+    height: 60px;
+    flex: 0 0 60px;
+    border-radius: 20px;
+    background: var(--md-sys-color-primary-container);
+    color: var(--md-sys-color-on-primary-container);
     display: grid;
     place-items: center;
-    color: var(--accent);
   }
   .titles {
     flex: 1 1 auto;
@@ -320,129 +295,187 @@
   }
   h1 {
     margin: 0;
-    font-size: 20px;
-    font-weight: 650;
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--md-sys-color-on-surface);
   }
   .sub {
-    color: var(--text-dim);
+    display: block;
+    margin-top: 2px;
+    color: var(--md-sys-color-on-surface-variant);
     font-size: 13px;
+    font-weight: 500;
   }
   .pill {
-    font-size: 12px;
-    font-weight: 600;
-    padding: 5px 11px;
-    border-radius: 999px;
-    background: var(--bg-elev);
-    color: var(--text-dim);
-    border: 1px solid var(--border);
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12.5px;
+    font-weight: 700;
+    padding: 7px 14px;
+    border-radius: var(--radius-pill);
+    background: var(--md-sys-color-surface-container-high);
+    color: var(--md-sys-color-on-surface-variant);
+  }
+  .pill-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: currentColor;
   }
   .pill.on {
-    color: var(--good);
-    border-color: color-mix(in srgb, var(--good) 40%, transparent);
-    background: color-mix(in srgb, var(--good) 12%, transparent);
+    color: var(--on-good-container);
+    background: var(--good-container);
+  }
+  .pill.on .pill-dot {
+    background: var(--good);
   }
 
+  /* Hardware Unit Cards */
   .cards {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 14px;
-    margin-bottom: 22px;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
   }
   .card {
-    background: var(--bg-panel);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 15px 16px;
-    box-shadow: var(--shadow);
+    background: var(--md-sys-color-surface-container-low);
+    border-radius: var(--radius-xl);
+    padding: 18px 20px;
+    display: flex;
+    flex-direction: column;
+  }
+  .card.disconnected {
+    background: color-mix(in srgb, var(--md-sys-color-surface-container-low) 65%, transparent);
   }
   .card-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 8px;
-    margin-bottom: 10px;
-    min-height: 40px;
+    gap: 10px;
+    margin-bottom: 12px;
+    min-height: 44px;
   }
   .card-title {
     display: inline-flex;
     align-items: center;
-    gap: 7px;
+    flex-wrap: wrap;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--md-sys-color-on-surface);
+  }
+  .tx-badge {
+    font-size: 11px;
+    font-weight: 800;
+    padding: 3px 9px;
+    border-radius: var(--radius-pill);
+    background: var(--md-sys-color-secondary-container);
+    color: var(--md-sys-color-on-secondary-container);
+    letter-spacing: 0.03em;
+  }
+  .card-picto {
+    width: 44px;
+    height: 44px;
+    flex: 0 0 44px;
+    border-radius: 14px;
+    background: var(--md-sys-color-surface-container);
+    display: grid;
+    place-items: center;
+  }
+
+  /* Protocol & Gain Chips */
+  .proto-pill {
     font-size: 11px;
     font-weight: 700;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    color: var(--text-faint);
-  }
-  /* Wire protocol version: v1 firmware in blue, v2 firmware in purple, in
-     the same pill style as the Connected badge. */
-  .proto-pill {
-    font-size: 10px;
-    font-weight: 700;
-    padding: 1px 7px;
-    border-radius: 999px;
-    background: var(--bg-elev);
-    color: var(--text-dim);
-    border: 1px solid var(--border);
+    padding: 2px 10px;
+    border-radius: var(--radius-pill);
+    background: var(--md-sys-color-surface-container-high);
+    color: var(--md-sys-color-on-surface-variant);
   }
   .proto-pill.v1 {
-    color: var(--accent);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--md-sys-color-secondary-container);
+    color: var(--md-sys-color-on-secondary-container);
   }
   .proto-pill.v2 {
-    color: #a855f7;
-    border-color: color-mix(in srgb, #a855f7 40%, transparent);
-    background: color-mix(in srgb, #a855f7 12%, transparent);
+    background: var(--md-sys-color-tertiary-container);
+    color: var(--md-sys-color-on-tertiary-container);
   }
+  .gain-chip {
+    font-size: 12px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    padding: 2px 10px;
+    border-radius: var(--radius-pill);
+    background: var(--md-sys-color-surface-container-high);
+    color: var(--md-sys-color-on-surface);
+  }
+  .gain-chip.zero {
+    background: var(--warn-container);
+    color: var(--on-warn-container);
+  }
+
   .kv {
     display: flex;
+    align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 3px 0;
-    font-size: 13px;
+    padding: 5px 0;
+    font-size: 13.5px;
   }
-  .kv span {
-    color: var(--text-dim);
+  .kv span:first-child {
+    color: var(--md-sys-color-on-surface-variant);
+    font-weight: 500;
   }
   .kv b {
     font-weight: 600;
     font-variant-numeric: tabular-nums;
-  }
-  /* Gain dial: orange at 0 (unity), the default (near-black/white) text
-     color otherwise -- +/- both read the same since either direction away
-     from 0 is equally "not neutral". */
-  .gain.zero {
-    color: var(--warn);
+    color: var(--md-sys-color-on-surface);
   }
   .muted {
-    color: var(--text-faint);
+    color: var(--md-sys-color-outline);
   }
+  .muted-box {
+    margin-top: 4px;
+    padding: 18px 14px;
+    border-radius: var(--radius-md);
+    background: var(--md-sys-color-surface-container);
+    color: var(--md-sys-color-outline);
+    text-align: center;
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  /* Expressive Audio Level Meter */
   .level {
-    margin-top: 8px;
-  }
-  .tone {
     margin-top: 10px;
+    padding: 10px 12px;
+    border-radius: var(--radius-md);
+    background: var(--md-sys-color-surface-container);
+  }
+  .lvl-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
   }
   .lvl-label {
     font-size: 12px;
-    color: var(--text-dim);
+    font-weight: 600;
+    color: var(--md-sys-color-on-surface-variant);
   }
-  /* VU meter: the track holds a fixed green→yellow→red gradient across its full
-     width; the .unfilled overlay hides everything past the current level, so low
-     levels show green and high levels reveal yellow then red. */
   .meter {
     position: relative;
-    margin-top: 5px;
-    height: 8px;
-    border-radius: 999px;
+    height: 12px;
+    border-radius: var(--radius-pill);
     overflow: hidden;
-    border: 1px solid var(--border);
     background: linear-gradient(
       90deg,
       #2ea043 0%,
-      #57b846 35%,
-      #e0b400 68%,
-      #e8863a 85%,
+      #57b846 38%,
+      #e0b400 70%,
+      #e8863a 86%,
       #e5484d 100%
     );
   }
@@ -452,84 +485,55 @@
     right: 0;
     bottom: 0;
     left: 0;
-    background: var(--bg);
-    transition: left 0.09s linear;
+    background: var(--md-sys-color-surface-container-highest);
+    transition: left 0.08s linear;
+  }
+  .tone {
+    margin-top: 8px;
   }
 
+  /* Settings Section Header */
   .settings-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 10px;
+    margin-bottom: 12px;
+    padding: 0 4px;
   }
   .settings-title {
-    font-size: 11px;
+    font-size: 16px;
     font-weight: 700;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    color: var(--text-faint);
-  }
-  .view-switch {
-    display: inline-flex;
-    background: var(--bg-elev);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 2px;
-  }
-  .view-switch button {
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    padding: 4px 12px;
-    border-radius: 999px;
-    font-size: 12px;
-    font-weight: 600;
-  }
-  .view-switch button.active {
-    background: var(--accent);
-    color: var(--accent-contrast);
+    letter-spacing: -0.01em;
+    color: var(--md-sys-color-on-surface);
   }
 
-  .settings {
-    background: var(--bg-panel);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 4px 18px 8px;
-    box-shadow: var(--shadow);
-  }
-
-  /* Masonry via balanced flex columns (see the script). Normal block flow means
-     shadows render cleanly, unlike CSS multi-column. */
+  /* Material 3 Expressive Grouped Columns */
   .groups {
     display: flex;
     align-items: flex-start;
-    gap: 18px;
+    gap: 16px;
   }
   .col {
     flex: 1 1 0;
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 18px;
   }
   .group {
-    background: var(--bg-panel);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 12px 14px 14px;
-    box-shadow: var(--shadow-card);
+    display: flex;
+    flex-direction: column;
   }
   .group-title {
-    font-size: 11px;
+    font-size: 12.5px;
     font-weight: 700;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    color: var(--text-faint);
-    margin-bottom: 10px;
+    letter-spacing: 0.02em;
+    color: var(--md-sys-color-primary);
+    margin: 0 0 8px 10px;
   }
   .group-grid {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 3px;
   }
 </style>

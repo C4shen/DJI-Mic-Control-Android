@@ -387,7 +387,24 @@ fn decode_v2_status(previous: &DeviceStatus, f: &[u8]) -> Option<DeviceStatus> {
     if remainder % V2_TX_SLOT_LEN != 0 {
         return None;
     }
-    let tx_count = (remainder / V2_TX_SLOT_LEN).min(2);
+    let tx_count = remainder / V2_TX_SLOT_LEN;
+    if tx_count > 2 {
+        return None;
+    }
+    // Verify the fixed RX status record header (`tag = 0x03`, `len = 0x20`)
+    // and each TX slot record header (`tag = 0x02`, `len = 0x1a`) so variable-
+    // length identity pushes whose total size happens to match `52 + 32*N + 2`
+    // (such as the 182-byte 2-TX DJI Mic Mini 2 identity push, where
+    // `182 - 54 = 128 = 4 * 32`) are never mistaken for a status push.
+    if f[14] != 0x03 || f[19] != 0x20 {
+        return None;
+    }
+    for slot_pos in 0..tx_count {
+        let slot_off = V2_HEADER_LEN + V2_TX_SLOT_LEN * slot_pos;
+        if f[slot_off] != 0x02 || f[slot_off + 5] != 0x1a {
+            return None;
+        }
+    }
 
     let flags1 = f[20]; // strong-NC 0x08, NC power 0x20, camera-power 0x80
     let flags2 = f[21]; // auto-off (RX) 0x01, stereo 0x04
@@ -405,6 +422,7 @@ fn decode_v2_status(previous: &DeviceStatus, f: &[u8]) -> Option<DeviceStatus> {
     status.connected = true;
     status.nc_enabled = flags1 & 0x20 != 0;
     status.gain_dial = Some(gain_dial);
+    status.tx_cache = previous.tx_cache.clone();
     // `V2_TX_CONNECTED_OFFSET`'s bits are the connected/disconnected source
     // of truth per physical TX — identity/level (from `decode_v2_records`)
     // is carried forward under whichever array index the bit for that unit
@@ -412,15 +430,22 @@ fn decode_v2_status(previous: &DeviceStatus, f: &[u8]) -> Option<DeviceStatus> {
     let connected = f[V2_TX_CONNECTED_OFFSET];
     status.tx = std::array::from_fn(|i| {
         (connected & (1 << i) != 0).then(|| {
-            previous.tx[i].clone().unwrap_or(TxInfo {
-                level: None,
-                serial: None,
-                firmware: None,
-                product_name: None,
-                voice_tone: None,
-                charging: None,
-                battery: None,
-            })
+            let mut tx = previous.tx[i]
+                .clone()
+                .unwrap_or_else(|| previous.tx_cache[i].clone());
+            if tx.serial.is_none() {
+                tx.serial = previous.tx_cache[i].serial.clone();
+            }
+            if tx.firmware.is_none() {
+                tx.firmware = previous.tx_cache[i].firmware;
+            }
+            if tx.product_name.is_none() {
+                tx.product_name = previous.tx_cache[i].product_name.clone();
+            }
+            if tx.level.is_none() {
+                tx.level = previous.tx_cache[i].level;
+            }
+            tx
         })
     });
     // Voice Tone, charging, and battery level don't mirror across TX the way
@@ -529,16 +554,11 @@ fn decode_v2_records(previous: &DeviceStatus, f: &[u8]) -> Option<DeviceStatus> 
                     }
                     1 | 2 => {
                         let i = (index - 1) as usize;
+                        status.tx_cache[i].serial = Some(serial.clone());
+                        status.tx_cache[i].firmware = Some(firmware);
+                        let cache = status.tx_cache[i].clone();
                         if let Some(slot) = status.tx.get_mut(i) {
-                            let tx = slot.get_or_insert_with(|| TxInfo {
-                                level: None,
-                                serial: None,
-                                firmware: None,
-                                product_name: None,
-                                voice_tone: None,
-                                charging: None,
-                                battery: None,
-                            });
+                            let tx = slot.get_or_insert(cache);
                             tx.serial = Some(serial);
                             tx.firmware = Some(firmware);
                         }
@@ -549,33 +569,22 @@ fn decode_v2_records(previous: &DeviceStatus, f: &[u8]) -> Option<DeviceStatus> 
             }
             0x05 if data.len() == 1 && (index == 1 || index == 2) => {
                 let i = (index - 1) as usize;
-                if let Some(slot) = status.tx.get_mut(i) {
-                    slot.get_or_insert_with(|| TxInfo {
-                        level: None,
-                        serial: None,
-                        firmware: None,
-                        product_name: None,
-                        voice_tone: None,
-                        charging: None,
-                        battery: None,
-                    })
-                    .level = Some(data[0]);
+                status.tx_cache[i].level = Some(data[0]);
+                // Only update the active slot if the transmitter is already
+                // known to be connected; the 30-byte level push always includes
+                // entries for both slots even when a transmitter is powered off.
+                if let Some(Some(tx)) = status.tx.get_mut(i) {
+                    tx.level = Some(data[0]);
                 }
                 matched = true;
             }
             0x06 if index == 1 || index == 2 => {
                 let i = (index - 1) as usize;
+                let product_name = read_ascii_field(data);
+                status.tx_cache[i].product_name = Some(product_name.clone());
+                let cache = status.tx_cache[i].clone();
                 if let Some(slot) = status.tx.get_mut(i) {
-                    slot.get_or_insert_with(|| TxInfo {
-                        level: None,
-                        serial: None,
-                        firmware: None,
-                        product_name: None,
-                        voice_tone: None,
-                        charging: None,
-                        battery: None,
-                    })
-                    .product_name = Some(read_ascii_field(data));
+                    slot.get_or_insert(cache).product_name = Some(product_name);
                 }
                 matched = true;
             }
@@ -942,6 +951,54 @@ mod tests {
             st.tx[0].as_ref().unwrap().product_name.as_deref(),
             Some("DJI Mic Mini 2")
         );
+    }
+
+    /// A synthetic receiver + TWO "DJI Mic Mini 2" transmitters identity push.
+    /// Because each "DJI Mic Mini 2" name is 14 bytes (2 bytes longer than
+    /// "DJI Mic Mini"), this frame is `178 + 4 = 182` bytes (`0xb6`).
+    /// Crucially, `182 - (52 + 2) = 128`, which is `4 * 32` (`128 % 32 == 0`)!
+    /// Regression test: `decode_v2_status` must NOT mistake this 182-byte
+    /// identity push for a status push and wipe out both connected TX slots.
+    fn sample_identity_rx_and_two_tx_v2_model() -> Vec<u8> {
+        let hex = concat!(
+            "55b6040000000000005b0303a600",
+            "010000000012001103024444444444444444444444444444",
+            "040000000006303030303030",
+            "06000000000c444a49204d6963204d696e69",
+            "010100000012000b03024545454545454545454545454545",
+            "040100000006613763303132",
+            "06010000000e444a49204d6963204d696e692032",
+            "010200000012000b03024646464646464646464646464646",
+            "040200000006623864313233",
+            "06020000000e444a49204d6963204d696e692032",
+        );
+        crate::crc::append(hex_body(hex), crate::crc::V2_INIT, crate::crc::V2_RESIDUE)
+    }
+
+    #[test]
+    fn two_mic_mini_2_identity_push_does_not_collide_with_status_push() {
+        let id_frame = sample_identity_rx_and_two_tx_v2_model();
+        assert_eq!(id_frame.len(), 182);
+
+        // First status push arrives -> 2 TX connected, identity not yet known.
+        let st1 = MicMini.decode(&fresh_status(), &sample_2tx_v2()).expect("status 1");
+        assert_eq!(st1.tx_count(), 2);
+
+        // Then 182-byte 2-TX Mic Mini 2 identity push arrives -> must decode as
+        // identity records, NOT as a bogus 4-slot status push that disconnects TX1/TX2.
+        let st2 = MicMini.decode(&st1, &id_frame).expect("identity 2-tx mic mini 2");
+        assert_eq!(st2.tx_count(), 2);
+        assert_eq!(st2.tx[0].as_ref().unwrap().serial.as_deref(), Some("EEEEEEEEEEEEEE"));
+        assert_eq!(st2.tx[0].as_ref().unwrap().product_name.as_deref(), Some("DJI Mic Mini 2"));
+        assert_eq!(st2.tx[1].as_ref().unwrap().serial.as_deref(), Some("FFFFFFFFFFFFFF"));
+        assert_eq!(st2.tx[1].as_ref().unwrap().product_name.as_deref(), Some("DJI Mic Mini 2"));
+
+        // Subsequent status push preserves both identities and product names.
+        let st3 = MicMini.decode(&st2, &sample_2tx_v2()).expect("status 2");
+        assert_eq!(st3.tx[0].as_ref().unwrap().serial.as_deref(), Some("EEEEEEEEEEEEEE"));
+        assert_eq!(st3.tx[0].as_ref().unwrap().product_name.as_deref(), Some("DJI Mic Mini 2"));
+        assert_eq!(st3.tx[1].as_ref().unwrap().serial.as_deref(), Some("FFFFFFFFFFFFFF"));
+        assert_eq!(st3.tx[1].as_ref().unwrap().product_name.as_deref(), Some("DJI Mic Mini 2"));
     }
 
     #[test]

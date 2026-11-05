@@ -5,21 +5,31 @@ edition.workspace = true
 license.workspace = true
 description = "Desktop control app for DJI wireless microphones."
 
+[lib]
+name = "djimic_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 device = { workspace = true }
+tauri = { version = "2", features = [] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri = { version = "2", features = ["image-png", "tray-icon"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
-serde = { workspace = true }
-serde_json = { workspace = true }
 
-[target.'cfg(unix)'.dependencies]
+[target.'cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))'.dependencies]
 libc = "0.2"
 signal-hook = "0.3"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
 
 [[bin]]
 name = "djimic-gui"

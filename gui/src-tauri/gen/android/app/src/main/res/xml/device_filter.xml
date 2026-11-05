@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- DJI Mic Mini / DJI Mic Mini 2 USB-C Receiver (VID 0x2ca3 = 11427, PID 0x4011 = 16401) -->
+    <usb-device vendor-id="11427" product-id="16401" />
+</resources>

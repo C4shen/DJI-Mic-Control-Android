@@ -1,14 +1,15 @@
 //! Discovery and orchestration of all connected devices.
 
 use std::collections::HashMap;
+#[cfg(not(target_os = "android"))]
 use std::io::ErrorKind;
 use std::sync::atomic::Ordering;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use protocol::{model_for_usb, DeviceModel, DeviceStatus, Setting, V2Target};
 use serde::Serialize;
 
-use crate::actor::{self, now_millis, Actor};
+use crate::actor::{self, now_millis, Actor, BridgeHandle};
 use crate::error::{DeviceError, Result};
 use crate::platform::{current_os, Os};
 
@@ -21,6 +22,7 @@ const LIVE_WINDOW_MS: u64 = 1500;
 struct Handle {
     model: &'static dyn DeviceModel,
     actor: Actor,
+    bridge: Option<Arc<BridgeHandle>>,
 }
 
 impl Handle {
@@ -100,54 +102,138 @@ impl DeviceManager {
         let mut handles = self.handles.lock().unwrap();
         handles.retain(|_, h| h.actor.alive.load(Ordering::Relaxed));
 
-        let mut present = 0;
-        let mut permission_issue = false;
+        #[cfg(not(target_os = "android"))]
+        {
+            let mut present = 0;
+            let mut permission_issue = false;
 
-        let devices = match nusb::list_devices() {
-            Ok(d) => d,
-            Err(_) => return,
-        };
-
-        for info in devices {
-            let Some(model) = model_for_usb(info.vendor_id(), info.product_id()) else {
-                continue;
+            let devices = match nusb::list_devices() {
+                Ok(d) => d,
+                Err(_) => return,
             };
-            present += 1;
-            let id = device_id(
-                info.serial_number(),
-                info.bus_number(),
-                info.device_address(),
-            );
-            if handles.contains_key(&id) {
-                continue;
-            }
 
-            let opened = info.open().and_then(|dev| {
-                for &iface in model.detach_interfaces() {
-                    let _ = dev.detach_kernel_driver(iface);
+            for info in devices {
+                let Some(model) = model_for_usb(info.vendor_id(), info.product_id()) else {
+                    continue;
+                };
+                present += 1;
+                let id = device_id(
+                    info.serial_number(),
+                    info.bus_number(),
+                    info.device_address(),
+                );
+                if handles.contains_key(&id) {
+                    continue;
                 }
-                dev.detach_and_claim_interface(model.interface())
-            });
 
-            match opened {
-                Ok(iface) => {
-                    let actor = actor::spawn(model, iface);
-                    handles.insert(id, Handle { model, actor });
-                }
-                Err(e) => {
-                    if e.kind() == ErrorKind::PermissionDenied {
-                        permission_issue = true;
+                let opened = info.open().and_then(|dev| {
+                    for &iface in model.detach_interfaces() {
+                        let _ = dev.detach_kernel_driver(iface);
+                    }
+                    dev.detach_and_claim_interface(model.interface())
+                });
+
+                match opened {
+                    Ok(iface) => {
+                        let actor = actor::spawn(model, iface);
+                        handles.insert(id, Handle { model, actor, bridge: None });
+                    }
+                    Err(e) => {
+                        if e.kind() == ErrorKind::PermissionDenied {
+                            permission_issue = true;
+                        }
                     }
                 }
             }
-        }
 
+            *self.probe.lock().unwrap() = Probe {
+                os: current_os(),
+                present,
+                accessible: handles.len(),
+                permission_issue,
+            };
+        }
+    }
+
+    /// Update the bus-scan probe state from an external USB host manager (such
+    /// as Android's `UsbManager`).
+    pub fn bridge_set_probe(&self, present: usize, accessible: usize, permission_issue: bool) {
         *self.probe.lock().unwrap() = Probe {
             os: current_os(),
             present,
-            accessible: handles.len(),
+            accessible,
             permission_issue,
         };
+    }
+
+    /// Register a newly-opened external USB device (e.g. from Android `UsbManager`).
+    /// Returns `true` if the `(vendor_id, product_id)` pair matches a supported model.
+    pub fn bridge_connect(&self, id: String, vendor_id: u16, product_id: u16) -> bool {
+        let Some(model) = model_for_usb(vendor_id, product_id) else {
+            return false;
+        };
+        let mut handles = self.handles.lock().unwrap();
+        handles.retain(|_, h| h.actor.alive.load(Ordering::Relaxed));
+        if handles.contains_key(&id) {
+            return true;
+        }
+        let (actor, bridge) = actor::spawn_bridged(model);
+        handles.insert(id, Handle { model, actor, bridge: Some(bridge) });
+        let count = handles.len();
+        drop(handles);
+
+        let mut probe = self.probe.lock().unwrap();
+        probe.accessible = count;
+        if probe.present < count {
+            probe.present = count;
+        }
+        probe.permission_issue = false;
+        true
+    }
+
+    /// Unregister and close an externally-managed USB device.
+    pub fn bridge_disconnect(&self, id: &str) {
+        let removed = self.handles.lock().unwrap().remove(id);
+        if let Some(h) = removed {
+            if let Some(b) = h.bridge {
+                b.disconnect();
+            }
+        }
+        let count = self.handles.lock().unwrap().len();
+        let mut probe = self.probe.lock().unwrap();
+        probe.accessible = count;
+    }
+
+    /// Feed Bulk-IN bytes from an externally-managed USB device into its decoder.
+    pub fn bridge_feed_bytes(&self, id: &str, data: &[u8]) {
+        let bridge = {
+            let handles = self.handles.lock().unwrap();
+            handles.get(id).and_then(|h| h.bridge.clone())
+        };
+        if let Some(b) = bridge {
+            b.feed_bytes(data);
+        }
+    }
+
+    /// Block until the next outgoing Bulk-OUT command packet is ready for `id`,
+    /// or `None` if `id` is disconnected.
+    pub fn bridge_next_packet(&self, id: &str) -> Option<Vec<u8>> {
+        let bridge = {
+            let handles = self.handles.lock().unwrap();
+            handles.get(id).and_then(|h| h.bridge.clone())
+        }?;
+        bridge.next_packet()
+    }
+
+    /// Complete the in-flight Bulk-OUT transfer for `id`.
+    pub fn bridge_complete_packet(&self, id: &str, result: Result<()>) {
+        let bridge = {
+            let handles = self.handles.lock().unwrap();
+            handles.get(id).and_then(|h| h.bridge.clone())
+        };
+        if let Some(b) = bridge {
+            b.complete_packet(result);
+        }
     }
 
     /// The most recent bus-scan result.
@@ -271,9 +357,56 @@ impl DeviceManager {
 }
 
 /// A stable per-session device id: the USB serial if present, else bus/address.
+#[cfg(not(target_os = "android"))]
 fn device_id(serial: Option<&str>, bus: u8, address: u8) -> String {
     match serial {
         Some(s) if !s.is_empty() => s.to_string(),
         _ => format!("usb-{bus}-{address}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bridged_device_decodes_heartbeat_and_sends_commands() {
+        let mgr = Arc::new(DeviceManager::new());
+        assert!(mgr.bridge_connect("android-usb-1".to_string(), 0x2ca3, 0x4011));
+        assert_eq!(mgr.only_device().as_deref(), Some("android-usb-1"));
+
+        // Feed a valid v2 2-TX heartbeat frame.
+        let hex = concat!(
+            "557604a65a020000005b0303660003000000002028310c00000000000000",
+            "0000000000000000000000000000030000001c00000002010000001ab825",
+            "04010078000000000000000000000000000000000000000002020000001a",
+            "b825040100780000000000000000000000000000000000000000",
+        );
+        let body: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        let hb = protocol::crc::append(body, protocol::crc::V2_INIT, protocol::crc::V2_RESIDUE);
+        mgr.bridge_feed_bytes("android-usb-1", &hb);
+
+        let st = mgr.status("android-usb-1").expect("status");
+        assert!(st.connected);
+        assert_eq!(st.protocol_version, Some(2));
+        assert_eq!(st.settings.get("noise-cancel").map(String::as_str), Some("strong"));
+
+        // Spawn a mock writer thread simulating Android's UsbDeviceConnection writer.
+        let mgr_writer = mgr.clone();
+        let writer = std::thread::spawn(move || {
+            let pkt = mgr_writer.bridge_next_packet("android-usb-1").expect("packet");
+            mgr_writer.bridge_complete_packet("android-usb-1", Ok(()));
+            pkt
+        });
+
+        mgr.set("android-usb-1", "noise-cancel", "basic").expect("set noise-cancel");
+        let sent_pkt = writer.join().expect("writer join");
+        assert_eq!(sent_pkt.len(), protocol::packet::V2_COMMAND_LEN);
+
+        mgr.bridge_disconnect("android-usb-1");
+        assert!(mgr.list().is_empty());
     }
 }

@@ -9,12 +9,15 @@ pub enum Os {
     Linux,
     MacOs,
     Windows,
+    Android,
     Other,
 }
 
 /// The OS this binary is running on.
 pub fn current_os() -> Os {
-    if cfg!(target_os = "linux") {
+    if cfg!(target_os = "android") {
+        Os::Android
+    } else if cfg!(target_os = "linux") {
         Os::Linux
     } else if cfg!(target_os = "macos") {
         Os::MacOs

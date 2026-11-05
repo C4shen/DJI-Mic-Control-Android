@@ -916,6 +916,7 @@ version = "1.1.0"
 dependencies = [
  "device",
  "image",
+ "jni",
  "libc",
  "serde",
  "serde_json",

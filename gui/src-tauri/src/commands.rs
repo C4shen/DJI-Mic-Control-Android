@@ -87,3 +87,10 @@ pub fn udev_help() -> UdevHelp {
         steps: device::udev_instructions(),
     }
 }
+
+/// Request USB host permission on Android if a supported device is attached
+/// without permission.
+#[tauri::command]
+pub fn request_usb_permission() {
+    crate::request_android_usb_permission();
+}

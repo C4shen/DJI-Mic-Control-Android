@@ -6,12 +6,15 @@
 //! over a channel. Because `nusb` transfers are queued rather than blocking,
 //! reads and writes coexist without the global lock a synchronous USB API needs.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(not(target_os = "android"))]
 use futures_lite::future;
+#[cfg(not(target_os = "android"))]
 use nusb::transfer::RequestBuffer;
+#[cfg(not(target_os = "android"))]
 use nusb::Interface;
 use protocol::packet::Dialect;
 use protocol::{packet, DeviceModel, DeviceStatus};
@@ -51,12 +54,14 @@ pub fn now_millis() -> u64 {
 }
 
 /// What the event loop woke up for.
+#[cfg(not(target_os = "android"))]
 enum Wake {
     Read(nusb::transfer::Completion<Vec<u8>>),
     Command(std::result::Result<Command, async_channel::RecvError>),
 }
 
 /// Spawn the background thread for a claimed device and return its handles.
+#[cfg(not(target_os = "android"))]
 pub fn spawn(model: &'static dyn DeviceModel, iface: Interface) -> Actor {
     let (cmd_tx, cmd_rx) = async_channel::unbounded::<Command>();
     let status = Arc::new(Mutex::new(DeviceStatus::disconnected(model.id())));
@@ -74,6 +79,125 @@ pub fn spawn(model: &'static dyn DeviceModel, iface: Interface) -> Actor {
     Actor { cmd_tx, status, alive, last_seen }
 }
 
+/// Handle used by an external USB transport (such as Android's `UsbManager`)
+/// to feed incoming Bulk-IN bytes and drain outgoing Bulk-OUT command packets.
+pub struct BridgeHandle {
+    model: &'static dyn DeviceModel,
+    cmd_rx: async_channel::Receiver<Command>,
+    status: Arc<Mutex<DeviceStatus>>,
+    alive: Arc<AtomicBool>,
+    last_seen: Arc<AtomicU64>,
+    rx_buf: Mutex<Vec<u8>>,
+    /// 1 = Dialect::V1, 2 = Dialect::V2.
+    dialect: AtomicU8,
+    seq: AtomicU16,
+    pending_resp: Mutex<Option<std::sync::mpsc::Sender<Result<()>>>>,
+}
+
+impl BridgeHandle {
+    /// Feed raw Bulk-IN bytes read from the USB endpoint into the frame decoder.
+    pub fn feed_bytes(&self, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+        let debug = std::env::var_os("DJIMIC_DEBUG").is_some();
+        if debug {
+            eprintln!("[bridge-read] len={} data={}", data.len(), hex(data));
+        }
+        let mut buf = self.rx_buf.lock().unwrap();
+        buf.extend_from_slice(data);
+        while let Some(frame) = packet::take_frame(&mut buf) {
+            if let Some(d) = packet::heartbeat_dialect(&frame) {
+                let code = match d {
+                    Dialect::V1 => 1,
+                    Dialect::V2 => 2,
+                };
+                self.dialect.store(code, Ordering::Relaxed);
+            }
+            let previous = self.status.lock().unwrap().clone();
+            let new_status = self.model.decode(&previous, &frame);
+            if debug {
+                eprintln!(
+                    "[bridge-frame] kind={:?} decoded={} {}",
+                    packet::frame_kind(&frame),
+                    new_status.is_some(),
+                    hex(&frame),
+                );
+            }
+            if let Some(new_status) = new_status {
+                *self.status.lock().unwrap() = new_status;
+                self.last_seen.store(now_millis(), Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Block until the next outgoing command packet is requested, or return
+    /// `None` once the device has been disconnected.
+    pub fn next_packet(&self) -> Option<Vec<u8>> {
+        loop {
+            if !self.alive.load(Ordering::Relaxed) {
+                return None;
+            }
+            let cmd = self.cmd_rx.recv_blocking().ok()?;
+            let dialect = match self.dialect.load(Ordering::Relaxed) {
+                1 => Dialect::V1,
+                _ => Dialect::V2,
+            };
+            let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+            match self.model.build_command(seq, dialect, &cmd.setting_id, &cmd.value, cmd.tx) {
+                Some(pkt) => {
+                    *self.pending_resp.lock().unwrap() = Some(cmd.resp);
+                    return Some(pkt);
+                }
+                None => {
+                    let _ = cmd.resp.send(Err(DeviceError::UnknownSetting(cmd.setting_id)));
+                }
+            }
+        }
+    }
+
+    /// Report the completion of the Bulk-OUT transfer for the packet returned
+    /// by [`next_packet`](Self::next_packet).
+    pub fn complete_packet(&self, result: Result<()>) {
+        if let Some(resp) = self.pending_resp.lock().unwrap().take() {
+            let _ = resp.send(result);
+        }
+    }
+
+    /// Mark the bridged device as disconnected and wake any blocked writer/caller.
+    pub fn disconnect(&self) {
+        self.alive.store(false, Ordering::Relaxed);
+        self.cmd_rx.close();
+        if let Some(resp) = self.pending_resp.lock().unwrap().take() {
+            let _ = resp.send(Err(DeviceError::Disconnected));
+        }
+    }
+}
+
+/// Create an [`Actor`] and [`BridgeHandle`] pair for an externally-managed USB
+/// connection (used on Android via `UsbManager`).
+pub fn spawn_bridged(model: &'static dyn DeviceModel) -> (Actor, Arc<BridgeHandle>) {
+    let (cmd_tx, cmd_rx) = async_channel::unbounded::<Command>();
+    let status = Arc::new(Mutex::new(DeviceStatus::disconnected(model.id())));
+    let alive = Arc::new(AtomicBool::new(true));
+    let last_seen = Arc::new(AtomicU64::new(0));
+
+    let bridge = Arc::new(BridgeHandle {
+        model,
+        cmd_rx,
+        status: status.clone(),
+        alive: alive.clone(),
+        last_seen: last_seen.clone(),
+        rx_buf: Mutex::new(Vec::with_capacity(1024)),
+        dialect: AtomicU8::new(2),
+        seq: AtomicU16::new(1),
+        pending_resp: Mutex::new(None),
+    });
+
+    (Actor { cmd_tx, status, alive, last_seen }, bridge)
+}
+
+#[cfg(not(target_os = "android"))]
 async fn run(
     model: &'static dyn DeviceModel,
     iface: Interface,
